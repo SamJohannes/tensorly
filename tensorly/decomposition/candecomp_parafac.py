@@ -1,4 +1,5 @@
 import numpy as np
+import warnings
 
 from .. import backend as T
 from ..random import check_random_state
@@ -324,64 +325,62 @@ def randomised_parafac(tensor, rank, n_samples, n_iter_max=100, init='svd',
     return factors
 
 
-def sample_mttkrp(factors, mode, n_samples, random_state=None):
-    """Calculates the sampled Khatri-Rao product and corresponding sample
-    indices
+def sample_khatri_rao(matrices, n_samples, skip_matrix=None, random_state=None):
+    """Random subsample of the Khatri-Rao product of the given list of matrices
 
-    Turns ``factors = [|U_1, ... U_n|]`` into the sampled mode `mode` Khatri-
-    Rao product with `n_samples` rows sampled uniformly with replacement from
-    the full Khatri-Rao product. The corresponding sampled row indices are
-    returned in `j_indices`.
+        If one matrix only is given, that matrix is directly returned.
 
     Parameters
     ----------
-    factors : ndarray list
-        list of matrices, all with the same number of columns
-        i.e.::
-            for u in U:
-                u[i].shape == (s_i, R)
+    matrices : ndarray list
+        list of matrices with the same number of columns, i.e.::
 
-        where `R` is fixed while `s_i` can vary with `i`
-    mode : int
-        skip mode of the khatri-rao product
+            for i in len(matrices):
+                matrices[i].shape = (n_i, m)
+                
     n_samples : int
         number of samples to be taken from the Khatri-Rao product
-    random_state : {None, int, np.random.RandomState}
 
+    skip_matrix : None or int, optional, default is None
+        if not None, index of a matrix to skip
+        
+    random_state : None, int or numpy.random.RandomState 
+        if int, used to set the seed of the random number generator
+        if numpy.random.RandomState, used to generate random_samples
 
     Returns
     -------
     sampled_Khatri_Rao : ndarray
         The sampled matricised tensor Khatri-Rao with `n_samples` rows
-    j_indices : int list
+        
+    indices_kr : int list
         list of length `n_samples` containing the sampled row indices
-
     """
-    rank = T.shape(factors[0])[1]
-    rng = check_random_state(random_state)
+    if random_state is None or not isinstance(random_state, np.random.RandomState):
+        rng = check_random_state(random_state)
+        warnings.warn('You are creating a new random number generator at each call.\n',
+                      'If you are calling sample_khatri_rao inside a loop this will be slow:',
+                      ' best to create a rng outside and pass it as argument (random_state=rng).')
+    else:
+        rng = random_state
 
-    # Calculate the random_ixs for each factor matrix
-    N = len(factors)
-    rand_ixs = np.zeros((n_samples, N), np.int)    
-    Ims = np.ones(N, np.int)
-    for i, f in enumerate(factors):
-        # Generated random indices of size n_samples
-        if i != mode:
-            rand_ixs[:, i] = rng.randint(0, T.shape(f)[0], n_samples)
+    if skip_matrix is not None:
+        matrices = [matrices[i] for i in range(len(matrices)) if i != skip_matrix]
+     
+    n_factors = len(matrices)
+    rank = T.shape(matrices[0])[1]
+    sizes = [T.shape(m)[0] for m in matrices]
 
-            if (i+1) < N:
-                Ims[i+1:N] *= T.shape(f)[0]
+    # For each matrix, randomly choose n_samples indices for which to compute the khatri-rao product
+    indices_list = [rng.randint(0, T.shape(m)[0], size=n_samples, dtype=int) for m in matrices]
+    # Compute corresponding rows of the full khatri-rao product
+    indices_kr = np.zeros((n_samples), dtype=int)
+    for size, indices in zip(sizes, indices_list):
+        indices_kr = indices_kr*size + indices
+    
+    # Compute the Khatri-Rao product for the chosen indices
+    sampled_kr = T.ones((n_samples, rank))
+    for indices, matrix in zip(indices_list, matrices):
+        sampled_kr = sampled_kr*matrix[indices, :]
 
-    # Find the corresponding jth row of the Khatri-Rao Product
-    j_ix = np.zeros(n_samples, np.int)
-    for i, col in enumerate(np.transpose(rand_ixs)):
-        if i != mode:
-            j_ix = j_ix * T.shape(factors[i])[0] + col
-
-    # Sample the khatri-rao product according to the given ixs
-    sampled_Z = np.ones((n_samples, rank))
-    for i, f in enumerate(factors):
-        if i != mode:
-            sampled_Z *= T.to_numpy(f)[rand_ixs[:, i], :]
-
-    return T.tensor(sampled_Z), j_ix
+    return sampled_kr, indices_kr
