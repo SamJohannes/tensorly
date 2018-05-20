@@ -3,7 +3,7 @@ import pytest
 
 from ..candecomp_parafac import (
     parafac, non_negative_parafac, normalize_factors, initialize_factors,
-    sample_mttkrp, randomised_parafac)
+    sample_khatri_rao, randomised_parafac)
 from ...kruskal_tensor import kruskal_to_tensor
 from ...random import check_random_state
 from ...tenalg import khatri_rao
@@ -84,8 +84,8 @@ def test_non_negative_parafac():
             'abs norm of difference between svd and random init too high')
 
 
-def test_sample_mttkrp():
-    """ Test for sample_mttkrp 
+def test_sample_khatri_rao():
+    """ Test for sample_khatri_rao 
     """
     
     rng = check_random_state(1234)
@@ -95,18 +95,18 @@ def test_sample_mttkrp():
     factors = parafac(tensor, rank=rank, n_iter_max=120)
     num_samples = 4
     skip_matrix = 1
-    sampled_Z, j_ix = sample_mttkrp(factors, skip_matrix, num_samples)
-    T.assert_(T.shape(sampled_Z) == (num_samples, rank),
-              'Sampled shape of Z is inconsistent')
-    T.assert_(np.max(j_ix) < (t_shape[0] * t_shape[2]),
+    sampled_kr, indices_kr = sample_khatri_rao(factors, num_samples, skip_matrix=skip_matrix)
+    T.assert_(T.shape(sampled_kr) == (num_samples, rank),
+              'Sampled shape of the sampled khatri-rao product is inconsistent')
+    T.assert_(np.max(indices_kr) < (t_shape[0] * t_shape[2]),
               'Calculated j index is bigger than number of columns of'
               'unfolded matrix')
-    T.assert_(np.min(j_ix) >= 0,
+    T.assert_(np.min(indices_kr) >= 0,
               'Calculated j index is smaller than 0')
-    act_kr = khatri_rao(factors, skip_matrix=skip_matrix)
-    for ix, j in enumerate(j_ix):
-        T.assert_(np.all(T.to_numpy(act_kr)[j] == T.to_numpy(sampled_Z)[ix]),
-                  'Sampled khatri_rao product doesnt correspond to product')
+    true_kr = khatri_rao(factors, skip_matrix=skip_matrix)
+    for indices, j in enumerate(indices_kr):
+        T.assert_(np.all(T.to_numpy(true_kr)[j] == T.to_numpy(sampled_kr)[indices]),
+                  'Sampled khatri_rao product elements do not correspond to actual product')
 
 
 def test_randomised_parafac():

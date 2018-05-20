@@ -251,8 +251,7 @@ def non_negative_parafac(tensor, rank, n_iter_max=100, init='svd', tol=10e-7,
 
 
 def randomised_parafac(tensor, rank, n_samples, n_iter_max=100, init='svd',
-                       tol=10e-7, max_stagnation=20, random_state=None,
-                       verbose=0):
+                       tol=10e-7, random_state=None, verbose=1):
     """Randomised CP decomposition via sampled ALS
 
     Parameters
@@ -268,10 +267,7 @@ def randomised_parafac(tensor, rank, n_samples, n_iter_max=100, init='svd',
     tol : float, optional
           tolerance: the algorithm stops when the variation in
           the reconstruction error is less than the tolerance
-    max_stagnation: int, optional
-                    the maximum allowed number of iterations with no decrease
-                    in fit
-    random_state : {None, int, np.random.RandomState}
+    random_state : {None, int, np.random.RandomState}, default is None
     verbose : int, optional
         level of verbosity
 
@@ -286,6 +282,7 @@ def randomised_parafac(tensor, rank, n_samples, n_iter_max=100, init='svd',
     .. [3] Casey Battaglino, Grey Ballard and Tamara G. Kolda,
        "A Practical Randomized CP Tensor Decomposition",
     """
+    rng = check_random_state(random_state)
     factors = initialize_factors(tensor, rank, init=init, random_state=random_state)
     rec_errors = []
     norm_tensor = T.norm(tensor, 2)
@@ -293,22 +290,20 @@ def randomised_parafac(tensor, rank, n_samples, n_iter_max=100, init='svd',
 
     for iteration in range(n_iter_max):
         for mode in range(T.ndim(tensor)):
-            S_Z, j_ixs = sample_mttkrp(factors, mode, n_samples)
-            Xnt = T.transpose(unfold(tensor, mode))
-            S_Xnt = T.tensor(T.to_numpy(Xnt)[j_ixs, :], **T.context(tensor))
-
-            pseudo_inverse = T.tensor(T.dot(T.transpose(S_Z), S_Z),
-                                      **T.context(tensor))
-            factor = T.dot(T.transpose(S_Z), S_Xnt)
-            factor = T.transpose(T.solve(pseudo_inverse, factor))
+            kr_prod, kr_indices = sample_khatri_rao(factors, n_samples, skip_matrix=mode,
+                                                    random_state=rng)
+            sampled_unfolding = unfold(tensor, mode)[:, kr_indices]
+            pseudo_inverse = T.dot(T.transpose(kr_prod), kr_prod)
+            factor = T.dot(sampled_unfolding, kr_prod)
+            factor = T.transpose(T.solve(pseudo_inverse, T.transpose(factor)))
             factors[mode] = factor
+        factors, l = normalize_factors(factors)
 
-        # if verbose or tol:
-        rec_error = T.norm(tensor - kruskal_to_tensor(factors), 2) / norm_tensor
-        if not min_error or rec_error < min_error:
-            min_error = rec_error
-            stagnation = -1
-        stagnation += 1
+        if verbose or tol:
+            rec_error = T.norm(tensor - kruskal_to_tensor(factors, l), 2) / norm_tensor
+            if not min_error or rec_error < min_error:
+                min_error = rec_error
+        
         rec_errors.append(rec_error)
 
         if iteration > 1:
@@ -316,8 +311,7 @@ def randomised_parafac(tensor, rank, n_samples, n_iter_max=100, init='svd',
                 print('reconstruction error={}, variation={}.'.format(
                     rec_errors[-1], rec_errors[-2] - rec_errors[-1]))
 
-            if (tol and abs(rec_errors[-2] - rec_errors[-1]) < tol) or \
-               stagnation > max_stagnation:
+            if (tol and abs(rec_errors[-2] - rec_errors[-1]) < tol):
                 if verbose:
                     print('converged in {} iterations.'.format(iteration))
                 break
@@ -358,8 +352,8 @@ def sample_khatri_rao(matrices, n_samples, skip_matrix=None, random_state=None):
     """
     if random_state is None or not isinstance(random_state, np.random.RandomState):
         rng = check_random_state(random_state)
-        warnings.warn('You are creating a new random number generator at each call.\n',
-                      'If you are calling sample_khatri_rao inside a loop this will be slow:',
+        warnings.warn('You are creating a new random number generator at each call.\n'
+                      'If you are calling sample_khatri_rao inside a loop this will be slow:'
                       ' best to create a rng outside and pass it as argument (random_state=rng).')
     else:
         rng = random_state
