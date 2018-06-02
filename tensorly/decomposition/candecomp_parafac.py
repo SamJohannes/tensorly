@@ -412,3 +412,178 @@ def randomised_parafac(tensor, rank, n_samples, n_iter_max=100, init='svd',
                     break
 
     return factors
+
+def sgd_parafac(tensor, rank, n_iter_max=100, init='svd',
+                       tol=10e-9, mbatch=200, random_state=None, verbose=1):
+    """Randomised CP decomposition via sampled ALS
+
+    Parameters
+    ----------
+    tensor : ndarray
+    rank   : int
+            number of components
+    n_samples : int
+                number of samples per ALS step
+    n_iter_max : int
+                 maximum number of iteration
+    init : {'svd', 'random'}, optional
+    tol : float, optional
+          tolerance: the algorithm stops when the variation in
+          the reconstruction error is less than the tolerance
+    max_stagnation: int, optional, default is 0
+                    if not zero, the maximum allowed number
+                    of iterations with no decrease in fit
+    random_state : {None, int, np.random.RandomState}, default is None
+    verbose : int, optional
+        level of verbosity
+
+    Returns
+    -------
+    factors : ndarray list
+            list of positive factors of the CP decomposition
+            element `i` is of shape ``(tensor.shape[i], rank)``
+
+    References
+    ----------
+    .. [3] Casey Battaglino, Grey Ballard and Tamara G. Kolda,
+       "A Practical Randomized CP Tensor Decomposition",
+    """
+    rng = check_random_state(random_state)
+    factors = initialize_factors(tensor, rank, init=init, random_state=random_state)
+    rec_errors = []
+    n_dims = T.ndim(tensor)
+    norm_tensor = T.norm(tensor, 2)
+    min_error = 0
+    rate = .0001  # Using bold driver heuristic
+    sizes = [T.shape(m)[0] for m in factors]
+
+    for iteration in range(n_iter_max):
+        rand_ixs = [rng.randint(0, s, size=mbatch, dtype=int) for s in sizes]
+        for j in range(mbatch):
+            # Select a random element of the tensor
+            rand_ix = [row_ix[j] for row_ix in rand_ixs]
+            # Compute the Hadamard product of the respective factor matrix rows
+            rand_factor_rows = [factors[i][ix, :] for i, ix in enumerate(rand_ix)]
+            full_hadamard = np.ones((1, rank))
+            for row in rand_factor_rows:
+                full_hadamard *= row
+
+                # Compute the loss at that point
+            point_est = np.sum(full_hadamard)
+            point_act = tensor[tuple(rand_ix)]
+            loss = point_act - point_est
+
+            for k, factor in enumerate(factors):
+                # Divide through by the relevant row
+                row_k_hadamard = np.divide(full_hadamard, rand_factor_rows[k])
+                factors[k][rand_ix[k], :] += np.squeeze(rate*loss*row_k_hadamard)
+
+        # Update the row
+        # if tol:
+        rec_error = T.norm(tensor - kruskal_to_tensor(factors), 2) / norm_tensor
+        rec_errors.append(rec_error)
+        if (len(rec_errors) > 1) and (rec_errors[-1] < rec_errors[-2]):
+            rate *= 1.1
+        else:
+            rate *= 0.5
+        print(rate)
+
+        if iteration > 1:
+            if verbose:
+                print('reconstruction error={}, variation={}.'.format(
+                    rec_errors[-1], rec_errors[-2] - rec_errors[-1]))
+
+            if (tol and abs(rec_errors[-2] - rec_errors[-1]) < tol):
+                if verbose:
+                    print('converged in {} iterations.'.format(iteration))
+                break
+
+    return factors
+
+
+def mb_sgd_parafac(tensor, rank, n_iter_max=100, init='svd',
+                       tol=10e-9, mbatch=200, random_state=None, verbose=1):
+    """Randomised CP decomposition via sampled ALS
+
+    Parameters
+    ----------
+    tensor : ndarray
+    rank   : int
+            number of components
+    n_samples : int
+                number of samples per ALS step
+    n_iter_max : int
+                 maximum number of iteration
+    init : {'svd', 'random'}, optional
+    tol : float, optional
+          tolerance: the algorithm stops when the variation in
+          the reconstruction error is less than the tolerance
+    max_stagnation: int, optional, default is 0
+                    if not zero, the maximum allowed number
+                    of iterations with no decrease in fit
+    random_state : {None, int, np.random.RandomState}, default is None
+    verbose : int, optional
+        level of verbosity
+
+    Returns
+    -------
+    factors : ndarray list
+            list of positive factors of the CP decomposition
+            element `i` is of shape ``(tensor.shape[i], rank)``
+
+    References
+    ----------
+    .. [3] Casey Battaglino, Grey Ballard and Tamara G. Kolda,
+       "A Practical Randomized CP Tensor Decomposition",
+    """
+    rng = check_random_state(random_state)
+    factors = initialize_factors(tensor, rank, init=init, random_state=random_state)
+    rec_errors = []
+    n_dims = T.ndim(tensor)
+    norm_tensor = T.norm(tensor, 2)
+    min_error = 0
+    rate = .0001  # Using bold driver heuristic
+    sizes = [T.shape(m)[0] for m in factors]
+
+    for iteration in range(n_iter_max):
+        rand_ixs = [rng.randint(0, s, size=mbatch, dtype=int) for s in sizes]
+        for j in range(mbatch):
+            # Select a random element of the tensor
+            rand_ix = [row_ix[j] for row_ix in rand_ixs]
+            # Compute the Hadamard product of the respective factor matrix rows
+            rand_factor_rows = [factors[i][ix, :] for i, ix in enumerate(rand_ix)]
+            full_hadamard = np.ones((1, rank))
+            for row in rand_factor_rows:
+                full_hadamard *= row
+
+                # Compute the loss at that point
+            point_est = np.sum(full_hadamard)
+            point_act = tensor[tuple(rand_ix)]
+            loss = point_act - point_est
+
+            for k, factor in enumerate(factors):
+                # Divide through by the relevant row
+                row_k_hadamard = np.divide(full_hadamard, rand_factor_rows[k])
+                factors[k][rand_ix[k], :] += np.squeeze(loss*row_k_hadamard)
+
+        # Update the row
+        # if tol:
+        rec_error = T.norm(tensor - kruskal_to_tensor(factors), 2) / norm_tensor
+        rec_errors.append(rec_error)
+        if (len(rec_errors) > 1) and (rec_errors[-1] < rec_errors[-2]):
+            rate *= 1.1
+        else:
+            rate *= 0.5
+        print(rate)
+
+        if iteration > 1:
+            if verbose:
+                print('reconstruction error={}, variation={}.'.format(
+                    rec_errors[-1], rec_errors[-2] - rec_errors[-1]))
+
+            if (tol and abs(rec_errors[-2] - rec_errors[-1]) < tol):
+                if verbose:
+                    print('converged in {} iterations.'.format(iteration))
+                break
+
+    return factors
