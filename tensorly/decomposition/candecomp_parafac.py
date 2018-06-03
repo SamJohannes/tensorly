@@ -539,45 +539,33 @@ def mb_sgd_parafac(tensor, rank, n_iter_max=100, init='svd', rate=0.001,
     rng = check_random_state(random_state)
     factors = initialize_factors(tensor, rank, init=init, random_state=random_state)
     rec_errors = []
+    n_dims = T.ndim(tensor)
     norm_tensor = T.norm(tensor, 2)
     sizes = [T.shape(m)[0] for m in factors]
 
+    # Adam Settings
+    beta_1 = 0.9
+    beta_2 = 0.999
+    eps = 10**-8
+    m_hist = [np.zeros((s, rank)) for s in sizes]
+    v_hist = [np.zeros((s, rank)) for s in sizes]
+
     for iteration in range(n_iter_max):
-        rand_ixs = np.array([rng.randint(0, s, size=mbatch, dtype=int) for s in sizes])
+        grad_ixs, grad_factors = get_mb_gradient(tensor, factors, sizes, mbatch, rank, rng)
+        # Simple minibatch update
+        up_ixs, up_factors = grad_ixs, grad_factors
+        for k in range(n_dims):
+            factors[k][up_ixs[k]] -= rate * up_factors[k]
 
-        # Compute the Hadamard product of the respective factor matrix rows
-        full_hadamard = np.ones((mbatch, rank))
-        for k, row_ixs in enumerate(rand_ixs):
-            full_hadamard *= factors[k][row_ixs]
-
-        # Compute the loss at that point
-        point_ests = np.sum(full_hadamard, 1)
-        point_acts = [tensor[tuple(ix)] for ix in rand_ixs.T]
-        losses = point_acts - point_ests
-
-        # for k, factor in enumerate(factors):
-        #     row_k_hadamard = np.divide(full_hadamard, factor[rand_ixs[k]])
-        #     row_k_hadamard = np.matmul(np.diag(losses), row_k_hadamard)*rate/mbatch
-        #     for i, row in enumerate(row_k_hadamard):
-        #         factors[k][rand_ixs[k, i]] += row
-
-        for k, factor in enumerate(factors):
-            # Divide through by the relevant row
-            row_k_hadamard = np.divide(full_hadamard, factor[rand_ixs[k]])
-            row_k_hadamard = np.matmul(np.diag(losses), row_k_hadamard)*rate/mbatch
-            # Determine duplicate_rows
-            uq, uq_ix, uq_count = np.unique(rand_ixs[k], return_index=1, return_counts=1)
-            uq_row_k_hadamard = row_k_hadamard[uq_ix]
-            for ix, c in enumerate(uq_count):
-                if c > 1:
-                    duplicate_element = uq[ix]
-                    mask = np.equal(rand_ixs[k], duplicate_element)
-                    uq_row_k_hadamard[ix] = np.sum(row_k_hadamard[mask], axis=0)
-            factors[k][uq] += uq_row_k_hadamard
-
-            # factors[k][rand_ixs[k]] += row_k_hadamard
-            # for i, row in enumerate(row_k_hadamard):
-            #     factors[k][rand_ixs[k, i]] += row
+        # # Adam Update
+        # m_hist, v_hist = adam_opt(grad_ixs, grad_factors, m_hist, v_hist, beta_1=beta_1, beta_2=beta_2)
+        # t = iteration+1
+        # for k in range(n_dims):
+        #     v_hat = v_hist[k] / (1-beta_1**t)
+        #     m_hat = m_hist[k] / (1-beta_2**t)
+        #     up_factor = np.power(v_hat, 1/2) + eps
+        #     up_factor = np.multiply(rate/up_factor, m_hat)
+        #     factors[k] -= up_factor
 
         # Update the row
         if tol:
@@ -587,7 +575,6 @@ def mb_sgd_parafac(tensor, rank, n_iter_max=100, init='svd', rate=0.001,
                 rate *= 1.1
             else:
                 rate *= 0.5
-    #        print(rate)
 
             if iteration > 1:
                 if verbose:
@@ -600,3 +587,47 @@ def mb_sgd_parafac(tensor, rank, n_iter_max=100, init='svd', rate=0.001,
                     break
 
     return factors
+
+
+def get_mb_gradient(tensor, factors, sizes, mbatch, rank, rng):
+    rand_ixs = np.array([rng.randint(0, s, size=mbatch, dtype=int) for s in sizes])
+
+    # Compute the Hadamard product of the respective factor matrix rows
+    full_hadamard = np.ones((mbatch, rank))
+    for k, row_ixs in enumerate(rand_ixs):
+        full_hadamard *= factors[k][row_ixs]
+
+    # Compute the loss at that point
+    point_ests = np.sum(full_hadamard, 1)
+    point_acts = [tensor[tuple(ix)] for ix in rand_ixs.T]
+    losses = point_acts - point_ests
+
+    up_ixs = []
+    up_factors = []
+    for k, factor in enumerate(factors):
+        # Divide through by the relevant row
+        row_k_hadamard = np.divide(full_hadamard, factor[rand_ixs[k]])
+        row_k_hadamard = np.matmul(np.diag(losses), row_k_hadamard)
+        # Determine duplicate_rows
+        uq, uq_ix, uq_count = np.unique(rand_ixs[k], return_index=1, return_counts=1)
+        uq_row_k_hadamard = row_k_hadamard[uq_ix]
+        for ix, c in enumerate(uq_count):
+            if c > 1:
+                duplicate_element = uq[ix]
+                mask = np.equal(rand_ixs[k], duplicate_element)
+                uq_row_k_hadamard[ix] = np.sum(row_k_hadamard[mask], axis=0)
+        up_ixs.append(uq)
+        up_factors.append(-1/mbatch*uq_row_k_hadamard)
+
+    return up_ixs, up_factors
+
+
+def adam_opt(grad_ixs, grads, ms, vs, beta_1=0.9, beta_2=0.999):
+    # Update the moment history vectors for m and v
+    for k, grad_ix in enumerate(grad_ixs):
+        ms[k] = ms[k] * beta_1
+        ms[k][grad_ix] += (1-beta_1)*grads[k]
+        vs[k] = vs[k] * beta_2
+        vs[k][grad_ix] += (1-beta_2)*np.square(grads[k])
+
+    return ms, vs
