@@ -414,7 +414,7 @@ def randomised_parafac(tensor, rank, n_samples, n_iter_max=100, init='svd',
     return factors
 
 def sgd_parafac(tensor, rank, n_iter_max=100, init='svd',
-                       tol=10e-9, mbatch=200, random_state=None, verbose=1):
+                       tol=10e-9, mbatch=50, random_state=None, verbose=1):
     """Randomised CP decomposition via sampled ALS
 
     Parameters
@@ -486,7 +486,7 @@ def sgd_parafac(tensor, rank, n_iter_max=100, init='svd',
             rate *= 1.1
         else:
             rate *= 0.5
-        print(rate)
+#        print(rate)
 
         if iteration > 1:
             if verbose:
@@ -580,23 +580,23 @@ def mb_sgd_parafac(tensor, rank, n_iter_max=100, init='svd', rate=0.001,
             #     factors[k][rand_ixs[k, i]] += row
 
         # Update the row
-        # if tol:
-        rec_error = T.norm(tensor - kruskal_to_tensor(factors), 2) / norm_tensor
-        rec_errors.append(rec_error)
-        if (len(rec_errors) > 1) and (rec_errors[-1] < rec_errors[-2]):
-            rate *= 1.1
-        else:
-            rate *= 0.5
-        print(rate)
+        if tol:
+            rec_error = T.norm(tensor - kruskal_to_tensor(factors), 2) / norm_tensor
+            rec_errors.append(rec_error)
+            if (len(rec_errors) > 1) and (rec_errors[-1] < rec_errors[-2]):
+                rate *= 1.1
+            else:
+                rate *= 0.5
+    #        print(rate)
 
-        if iteration > 1:
-            if verbose:
-                print('reconstruction error={}, variation={}.'.format(
-                    rec_errors[-1], rec_errors[-2] - rec_errors[-1]))
-
-            if (tol and abs(rec_errors[-2] - rec_errors[-1]) < tol):
+            if iteration > 1:
                 if verbose:
-                    print('converged in {} iterations.'.format(iteration))
-                break
+                    print('reconstruction error={}, variation={}.'.format(
+                        rec_errors[-1], rec_errors[-2] - rec_errors[-1]))
+
+                if (tol and abs(rec_errors[-2] - rec_errors[-1]) < tol):
+                    if verbose:
+                        print('converged in {} iterations.'.format(iteration))
+                    break
 
     return factors
