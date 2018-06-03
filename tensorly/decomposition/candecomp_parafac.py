@@ -501,8 +501,8 @@ def sgd_parafac(tensor, rank, n_iter_max=100, init='svd',
     return factors
 
 
-def mb_sgd_parafac(tensor, rank, n_iter_max=100, init='svd',
-                       tol=10e-9, mbatch=200, random_state=None, verbose=1):
+def mb_sgd_parafac(tensor, rank, n_iter_max=100, init='svd', rate=0.001,
+                       tol=10e-9, mbatch=50, random_state=None, verbose=0):
     """Randomised CP decomposition via sampled ALS
 
     Parameters
@@ -539,32 +539,45 @@ def mb_sgd_parafac(tensor, rank, n_iter_max=100, init='svd',
     rng = check_random_state(random_state)
     factors = initialize_factors(tensor, rank, init=init, random_state=random_state)
     rec_errors = []
-    n_dims = T.ndim(tensor)
     norm_tensor = T.norm(tensor, 2)
-    min_error = 0
-    rate = .0001  # Using bold driver heuristic
     sizes = [T.shape(m)[0] for m in factors]
 
     for iteration in range(n_iter_max):
-        rand_ixs = [rng.randint(0, s, size=mbatch, dtype=int) for s in sizes]
-        for j in range(mbatch):
-            # Select a random element of the tensor
-            rand_ix = [row_ix[j] for row_ix in rand_ixs]
-            # Compute the Hadamard product of the respective factor matrix rows
-            rand_factor_rows = [factors[i][ix, :] for i, ix in enumerate(rand_ix)]
-            full_hadamard = np.ones((1, rank))
-            for row in rand_factor_rows:
-                full_hadamard *= row
+        rand_ixs = np.array([rng.randint(0, s, size=mbatch, dtype=int) for s in sizes])
 
-                # Compute the loss at that point
-            point_est = np.sum(full_hadamard)
-            point_act = tensor[tuple(rand_ix)]
-            loss = point_act - point_est
+        # Compute the Hadamard product of the respective factor matrix rows
+        full_hadamard = np.ones((mbatch, rank))
+        for k, row_ixs in enumerate(rand_ixs):
+            full_hadamard *= factors[k][row_ixs]
 
-            for k, factor in enumerate(factors):
-                # Divide through by the relevant row
-                row_k_hadamard = np.divide(full_hadamard, rand_factor_rows[k])
-                factors[k][rand_ix[k], :] += np.squeeze(loss*row_k_hadamard)
+        # Compute the loss at that point
+        point_ests = np.sum(full_hadamard, 1)
+        point_acts = [tensor[tuple(ix)] for ix in rand_ixs.T]
+        losses = point_acts - point_ests
+
+        # for k, factor in enumerate(factors):
+        #     row_k_hadamard = np.divide(full_hadamard, factor[rand_ixs[k]])
+        #     row_k_hadamard = np.matmul(np.diag(losses), row_k_hadamard)*rate/mbatch
+        #     for i, row in enumerate(row_k_hadamard):
+        #         factors[k][rand_ixs[k, i]] += row
+
+        for k, factor in enumerate(factors):
+            # Divide through by the relevant row
+            row_k_hadamard = np.divide(full_hadamard, factor[rand_ixs[k]])
+            row_k_hadamard = np.matmul(np.diag(losses), row_k_hadamard)*rate/mbatch
+            # Determine duplicate_rows
+            uq, uq_ix, uq_count = np.unique(rand_ixs[k], return_index=1, return_counts=1)
+            uq_row_k_hadamard = row_k_hadamard[uq_ix]
+            for ix, c in enumerate(uq_count):
+                if c > 1:
+                    duplicate_element = uq[ix]
+                    mask = np.equal(rand_ixs[k], duplicate_element)
+                    uq_row_k_hadamard[ix] = np.sum(row_k_hadamard[mask], axis=0)
+            factors[k][uq] += uq_row_k_hadamard
+
+            # factors[k][rand_ixs[k]] += row_k_hadamard
+            # for i, row in enumerate(row_k_hadamard):
+            #     factors[k][rand_ixs[k, i]] += row
 
         # Update the row
         # if tol:
