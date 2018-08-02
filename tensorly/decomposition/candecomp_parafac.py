@@ -100,7 +100,8 @@ def initialize_factors(tensor, rank, init='svd', random_state=None):
 
 
 def parafac(tensor, rank, n_iter_max=100, init='svd', tol=1e-8,
-            orthogonalise=False, random_state=None, verbose=False, return_errors=False):
+            orthogonalise=False, random_state=None, verbose=False, return_errors=False,
+            return_gradients=False, return_times=False):
     """CANDECOMP/PARAFAC decomposition via alternating least squares (ALS)
 
     Computes a rank-`rank` decomposition of `tensor` [1]_ such that,
@@ -145,6 +146,7 @@ def parafac(tensor, rank, n_iter_max=100, init='svd', tol=1e-8,
 
     factors = initialize_factors(tensor, rank, init=init, random_state=random_state)
     rec_errors = []
+    gradients = []
     norm_tensor = T.norm(tensor, 2)
 
     for iteration in range(n_iter_max):
@@ -159,6 +161,10 @@ def parafac(tensor, rank, n_iter_max=100, init='svd', tol=1e-8,
             factor = T.dot(unfold(tensor, mode), khatri_rao(factors, skip_matrix=mode))
             factor = T.transpose(T.solve(T.transpose(pseudo_inverse), T.transpose(factor)))
             factors[mode] = factor
+
+        # Calculate Full Gradient for plotting purposes
+        if return_gradients:
+            gradients.append(get_full_gradient(tensor, factors))
 
         if tol:
             rec_error = T.norm(tensor - kruskal_to_tensor(factors), 2) / norm_tensor
@@ -414,3 +420,20 @@ def randomised_parafac(tensor, rank, n_samples, n_iter_max=100, init='svd',
                     break
 
     return factors
+
+def get_full_gradient(tensor, factors):
+    """ Return the full gradient as in equation 2.15 of Hans' GMRES paper on 
+    tensor decomposition.
+
+    NOTE: does the matricisation style of tensorly affect how Hans' equations? I
+    have a feeling that the order of the MTKRP is reversed."""
+    gradients = []
+    [_, rank] = factors[0].shape
+    pseudo_inverse = T.tensor(np.ones((rank, rank)), **T.context(tensor))
+    for i, factor in enumerate(factors):
+        if i != mode:
+            pseudo_inverse = pseudo_inverse*T.dot(T.transpose(factor), factor)
+    for mode, factor in enumerate(factors):
+        kr_prod = khatri_rao(factors, mode)
+        gamma_term = 1
+        T.
