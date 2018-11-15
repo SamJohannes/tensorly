@@ -1,5 +1,6 @@
 import numpy as np
 import warnings
+import time
 
 from .. import backend as T
 from ..random import check_random_state
@@ -147,8 +148,17 @@ def parafac(tensor, rank, n_iter_max=100, init='svd', tol=1e-8,
     factors = initialize_factors(tensor, rank, init=init, random_state=random_state)
     rec_errors = []
     gradients = []
+    loss_values = []
+    times = []
+    fits = []
     norm_tensor = T.norm(tensor, 2)
 
+    norm_diff = T.norm(tensor - kruskal_to_tensor(factors))
+    # loss_values.append(0.5 * norm_diff**2)
+    # fits.append(1 - norm_diff/norm_tensor)
+    print(1 - norm_diff/norm_tensor)        
+
+    start = time.time()
     for iteration in range(n_iter_max):
         if orthogonalise and iteration <= orthogonalise:
             factor = [T.qr(factor)[0] for factor in factors]
@@ -162,9 +172,17 @@ def parafac(tensor, rank, n_iter_max=100, init='svd', tol=1e-8,
             factor = T.transpose(T.solve(T.transpose(pseudo_inverse), T.transpose(factor)))
             factors[mode] = factor
 
+        # Calculate successive times if required
+        if return_times:
+            end = time.time()
+            times.append(end-start)
+
         # Calculate Full Gradient for plotting purposes
         if return_gradients:
             gradients.append(get_full_gradient(tensor, factors))
+            norm_diff = T.norm(tensor - kruskal_to_tensor(factors))
+            loss_values.append(0.5 * norm_diff**2)
+            fits.append(1 - norm_diff/norm_tensor)
 
         if tol:
             rec_error = T.norm(tensor - kruskal_to_tensor(factors), 2) / norm_tensor
@@ -182,6 +200,10 @@ def parafac(tensor, rank, n_iter_max=100, init='svd', tol=1e-8,
                     
     if return_errors:
         return factors, rec_errors
+    elif return_gradients:
+        return factors, gradients, loss_values, fits
+    elif return_times:
+        return factors, times
     else:
         return factors
 
@@ -340,7 +362,8 @@ def sample_khatri_rao(matrices, n_samples, skip_matrix=None,
 
 
 def randomised_parafac(tensor, rank, n_samples, n_iter_max=100, init='svd',
-                       tol=10e-9, max_stagnation=20, random_state=None, verbose=1):
+                       tol=10e-9, max_stagnation=20, random_state=None, verbose=1,
+                       return_gradients=False, return_times=False):
     """Randomised CP decomposition via sampled ALS
 
     Parameters
@@ -377,10 +400,20 @@ def randomised_parafac(tensor, rank, n_samples, n_iter_max=100, init='svd',
     rng = check_random_state(random_state)
     factors = initialize_factors(tensor, rank, init=init, random_state=random_state)
     rec_errors = []
+    gradients = []
+    loss_values = []
+    times = []
+    fits = []
     n_dims = T.ndim(tensor)
     norm_tensor = T.norm(tensor, 2)
     min_error = 0
-
+    
+    norm_diff = T.norm(tensor - kruskal_to_tensor(factors))
+    # loss_values.append(0.5 * norm_diff**2)
+    # fits.append(1 - norm_diff/norm_tensor)
+    print(1 - norm_diff/norm_tensor)        
+    
+    start = time.time()
     for iteration in range(n_iter_max):
         for mode in range(n_dims):
             kr_prod, indices_list = sample_khatri_rao(factors, n_samples, skip_matrix=mode, random_state=rng)
@@ -398,6 +431,18 @@ def randomised_parafac(tensor, rank, n_samples, n_iter_max=100, init='svd',
             factor = T.dot(T.transpose(kr_prod), sampled_unfolding)
             factor = T.transpose(T.solve(pseudo_inverse, factor))
             factors[mode] = factor
+
+        # Calculate successive times if required
+        if return_times:
+            end = time.time()
+            times.append(end-start)
+
+        # Calculate Full Gradient for plotting purposes
+        if return_gradients:
+            gradients.append(get_full_gradient(tensor, factors))
+            norm_diff = T.norm(tensor - kruskal_to_tensor(factors))
+            loss_values.append(0.5 * norm_diff**2)
+            fits.append(1 - norm_diff/norm_tensor)
             
         if max_stagnation or tol:
             rec_error = T.norm(tensor - kruskal_to_tensor(factors), 2) / norm_tensor
@@ -419,21 +464,309 @@ def randomised_parafac(tensor, rank, n_samples, n_iter_max=100, init='svd',
                         print('converged in {} iterations.'.format(iteration))
                     break
 
-    return factors
+    if return_gradients:
+        return factors, gradients, loss_values, fits
+    elif return_times:
+        return factors, times
+    else:
+        return factors
+
 
 def get_full_gradient(tensor, factors):
     """ Return the full gradient as in equation 2.15 of Hans' GMRES paper on 
     tensor decomposition.
 
-    NOTE: does the matricisation style of tensorly affect how Hans' equations? I
-    have a feeling that the order of the MTKRP is reversed."""
+    NOTES: 
+    + does the matricisation style of tensorly affect how Hans' equations? I
+    have a feeling that the order of the MTKRP is reversed.
+    + The frobenius norm of a vector of matrices is currently being used"""
     gradients = []
     [_, rank] = factors[0].shape
-    pseudo_inverse = T.tensor(np.ones((rank, rank)), **T.context(tensor))
-    for i, factor in enumerate(factors):
-        if i != mode:
-            pseudo_inverse = pseudo_inverse*T.dot(T.transpose(factor), factor)
-    for mode, factor in enumerate(factors):
-        kr_prod = khatri_rao(factors, mode)
-        gamma_term = 1
-        T.
+
+    for mode in range(T.ndim(tensor)):
+        pseudo_inverse = T.tensor(np.ones((rank, rank)), **T.context(tensor))
+        for i, factor in enumerate(factors):
+            if i != mode:
+                pseudo_inverse = pseudo_inverse*T.dot(T.transpose(factor), factor)
+        factor = T.dot(unfold(tensor, mode), khatri_rao(factors, skip_matrix=mode))
+        gradients.append(-1*factor + T.dot(factors[mode], pseudo_inverse))
+
+    grad_norm = [np.linalg.norm(g)**2 for g in gradients]
+    return np.sqrt(sum(grad_norm))
+
+
+def sgd_parafac(tensor, rank, n_iter_max=100, init='svd', rate=0.005,
+                tol=10e-9, random_state=None, verbose=1,
+                return_gradients=False, return_times=False, step=None):
+    rng = check_random_state(random_state)
+    """step = None - for no rate change
+            = 'bold' - for bold driver
+            = 'decay' - for c/k decaying rate"""
+    norm_tensor = T.norm(tensor, 2)
+
+    # Hack around the negative initial fit leading to weird results
+    factors = initialize_factors(tensor, rank, init=init, random_state=random_state)
+    rec_errors = []
+    gradients = []
+    times = []
+    loss_values = []
+    fits = []
+    n_dims = T.ndim(tensor)
+
+    norm_diff = T.norm(tensor - kruskal_to_tensor(factors))
+    # loss_values.append(0.5 * norm_diff**2)
+    # fits.append(1 - norm_diff/norm_tensor)
+    print(1 - norm_diff/norm_tensor)        
+
+    min_error = 0
+    sizes = [T.shape(m)[0] for m in factors]
+
+    start = time.time()
+
+    for iteration in range(n_iter_max):
+        rand_ix = [rng.randint(0, s, dtype=int) for s in sizes]
+
+        # Compute the Hadamard product of the respective factor matrix rows
+        full_hadamard = np.ones((1, rank))
+        for i, ix in enumerate(rand_ix):
+            full_hadamard *= factors[i][ix]
+
+        # Compute the loss at that point
+        point_est = np.sum(full_hadamard)
+        point_act = tensor[tuple(rand_ix)]
+        loss = point_act - point_est
+
+        for k, factor in enumerate(factors):
+            # Divide through by the relevant row
+            row_k_hadamard = np.divide(full_hadamard, factor[rand_ix[k]])
+            factors[k][rand_ix[k]] += np.squeeze(rate*loss*row_k_hadamard)
+
+        # Update the learning rate:
+        if step == 'bold':
+            # Note that this will be inefficient due to the full reconstruction
+            # of the tensor each iteration -> use of the Kolda approximation
+            # should be investigated
+            rec_error = T.norm(tensor - kruskal_to_tensor(factors), 2) / norm_tensor
+            rec_errors.append(rec_error)
+            if (len(rec_errors) > 1) and (rec_errors[-1] < rec_errors[-2]):
+                rate *= 1.1
+            else:
+                rate *= 0.5
+        elif step == 'decay':
+            rate = rate / (iteration + 1)
+
+
+        # Caate successive times if required
+        if return_times and iteration % 100 == 0:
+            end = time.time()
+            times.append(end-start)
+
+        # Calculate Full Gradient for plotting purposes
+        if return_gradients and iteration % 100 == 0:
+            # gradients.append(get_full_gradient(tensor, factors))
+            # TOOO Costly
+            norm_diff = T.norm(tensor - kruskal_to_tensor(factors))
+            loss_values.append(0.5 * norm_diff**2)
+            fits.append(1 - norm_diff/norm_tensor)
+            # loss_values.append(0)
+            # fits.append(0)
+
+        if iteration > 1:
+            if verbose:
+                print('reconstruction error={}, variation={}.'.format(
+                    rec_errors[-1], rec_errors[-2] - rec_errors[-1]))
+
+            if (tol and abs(rec_errors[-2] - rec_errors[-1]) < tol):
+                if verbose:
+                    print('converged in {} iterations.'.format(iteration))
+                break
+
+    # Avoiding the problem of too many iterations to compute it every time
+    norm_diff = T.norm(tensor - kruskal_to_tensor(factors))
+    print(1 - norm_diff/norm_tensor)
+            
+    if return_gradients:
+        return factors, gradients, loss_values, fits
+    elif return_times:
+        return factors, times
+    else:
+        return factors
+
+
+def mb_sgd_parafac(tensor, rank, n_iter_max=100, init='svd', rate=0.001,
+                       tol=10e-9, mbatch=50, random_state=None, verbose=0,
+                   return_gradients=False, return_times=False):
+    rng = check_random_state(random_state)
+    factors = initialize_factors(tensor, rank, init=init, random_state=random_state)
+    rec_errors = []
+    gradients = []
+    times = []
+    loss_values = []
+    norm_tensor = T.norm(tensor, 2)
+    sizes = [T.shape(m)[0] for m in factors]
+
+    start = time.time()
+    for iteration in range(n_iter_max):
+        grad_ixs, grad_factors = get_mb_gradient(tensor, factors, sizes, mbatch, rank, rng)
+        # Simple minibatch update
+        up_ixs, up_factors = grad_ixs, grad_factors
+        for k, ix in enumerate(up_ixs):
+            factors[k][ix] -= rate * up_factors[k]
+
+        # Calculate successive times if required
+        if return_times:
+            end = time.time()
+            times.append(end-start)
+
+        # Calculate Full Gradient for plotting purposes
+        if return_gradients:
+            # gradients.append(get_full_gradient(tensor, factors))
+            loss_values.append(0.5 * T.norm(tensor - kruskal_to_tensor(factors))**2)
+
+        # Update the row
+        if tol:
+            rec_error = T.norm(tensor - kruskal_to_tensor(factors), 2) / norm_tensor
+            rec_errors.append(rec_error)
+            if (len(rec_errors) > 1) and (rec_errors[-1] < rec_errors[-2]):
+                rate *= 1.1
+            else:
+                rate *= 0.5
+
+            if iteration > 1:
+                if verbose:
+                    print('reconstruction error={}, variation={}.'.format(
+                        rec_errors[-1], rec_errors[-2] - rec_errors[-1]))
+
+                if (tol and abs(rec_errors[-2] - rec_errors[-1]) < tol):
+                    if verbose:
+                        print('converged in {} iterations.'.format(iteration))
+                    break
+
+    if return_gradients:
+        return factors, gradients, loss_values
+    elif return_times:
+        return factors, times
+    else:
+        return factors
+
+
+def get_mb_gradient(tensor, factors, sizes, mbatch, rank, rng):
+    rand_ixs = np.array([rng.randint(0, s, size=mbatch, dtype=int) for s in sizes])
+
+    # Compute the Hadamard product of the respective factor matrix rows
+    full_hadamard = np.ones((mbatch, rank))
+    for k, row_ixs in enumerate(rand_ixs):
+        full_hadamard *= factors[k][row_ixs]
+
+    # Compute the loss at that point
+    point_ests = np.sum(full_hadamard, 1)
+    point_acts = [tensor[tuple(ix)] for ix in rand_ixs.T]
+    losses = point_acts - point_ests
+
+    up_ixs = []
+    up_factors = []
+    for k, factor in enumerate(factors):
+        
+        # Divide through by the relevant row
+        row_k_hadamard = np.divide(full_hadamard, factor[rand_ixs[k]])
+        row_k_hadamard = np.matmul(np.diag(losses), row_k_hadamard)
+        # Determine duplicate_rows
+        uq, uq_ix, uq_count = np.unique(rand_ixs[k], return_index=1, return_counts=1)
+        uq_row_k_hadamard = row_k_hadamard[uq_ix]
+        for ix, c in enumerate(uq_count):
+            if c > 1:
+                duplicate_element = uq[ix]
+                mask = np.equal(rand_ixs[k], duplicate_element)
+                uq_row_k_hadamard[ix] = np.sum(row_k_hadamard[mask], axis=0)
+        up_ixs.append(uq)
+        up_factors.append(-1/mbatch*uq_row_k_hadamard)
+
+    return np.array(up_ixs), np.array(up_factors)
+
+
+def spils(tensor, rank, n_iter_max=100, init='svd', tol=1e-8, mbatch=10,
+            orthogonalise=False, random_state=None, verbose=False, return_errors=False,
+            return_gradients=False, return_times=False):
+    """
+    mbatch: number of samples for each row LS problem
+    """
+    rng = check_random_state(random_state)
+
+    if orthogonalise and not isinstance(orthogonalise, int):
+        orthogonalise = n_iter_max
+
+    factors = initialize_factors(tensor, rank, init=init, random_state=random_state)
+    rec_errors = []
+    gradients = []
+    loss_values = []
+    times = []
+    fits = []
+    norm_tensor = T.norm(tensor, 2)
+    n_dim = T.ndim(tensor)
+    sizes = [T.shape(m)[0] for m in factors]
+
+    norm_diff = T.norm(tensor - kruskal_to_tensor(factors))
+    # loss_values.append(0.5 * norm_diff**2)
+    # fits.append(1 - norm_diff/norm_tensor)
+    print(1 - norm_diff/norm_tensor)        
+
+    
+    start = time.time()
+    for iteration in range(n_iter_max):
+        if orthogonalise and iteration <= orthogonalise:
+            factor = [T.qr(factor)[0] for factor in factors]
+
+        for mode in range(n_dim):
+            f = factors[mode]
+            for j in range(f.shape[0]):
+                # Generate the indexes of the random samples
+                samples = []
+                rand_ixs = np.array([rng.randint(0, s, size=mbatch, dtype=int) for s in sizes])
+                rand_ixs[mode] = np.ones(mbatch, np.int)*j
+
+                # Generate the LHS vector
+                sampled_entries = np.array([tensor[tuple(row)] for row in rand_ixs.T], ndmin=2)
+
+                # Generate the RHS vector (hadamard of factor matrices)
+                pseudo_inverse = np.ones((mbatch, rank))
+                for i, factor in enumerate(factors):
+                    if i != mode:
+                        pseudo_inverse = pseudo_inverse*factor[rand_ixs[i]]
+                tmp = np.linalg.lstsq(pseudo_inverse, sampled_entries.T)[0].T
+                factors[mode][j] = tmp
+
+        # Calculate successive times if required
+        if return_times:
+            end = time.time()
+            times.append(end-start)
+
+        # Calculate Full Gradient for plotting purposes
+        if return_gradients:
+            gradients.append(get_full_gradient(tensor, factors))
+            norm_diff = T.norm(tensor - kruskal_to_tensor(factors))
+            loss_values.append(0.5 * norm_diff**2)
+            fits.append(1 - norm_diff/norm_tensor)
+
+        if tol:
+            rec_error = T.norm(tensor - kruskal_to_tensor(factors), 2) / norm_tensor
+            rec_errors.append(rec_error)
+
+            if iteration > 1:
+                if verbose:
+                    print('reconstruction error={}, variation={}.'.format(
+                        rec_errors[-1], rec_errors[-2] - rec_errors[-1]))
+
+                if tol and abs(rec_errors[-2] - rec_errors[-1]) < tol:
+                    if verbose:
+                        print('converged in {} iterations.'.format(iteration))
+                    break
+                    
+    if return_errors:
+        return factors, rec_errors
+    elif return_gradients:
+        return factors, gradients, loss_values, fits
+    elif return_times:
+        return factors, times
+    else:
+        return factors
+    
